@@ -1,0 +1,164 @@
+#!/usr/bin/env python
+
+import rospy
+import signal
+from geometry_msgs.msg import Point, Pose, Quaternion, Twist, Vector3
+from std_msgs.msg import Float32
+from nav_msgs.msg import Odometry
+from sensor_msgs.msg import LaserScan
+from tf.transformations import euler_from_quaternion, quaternion_from_euler
+import math
+import string
+
+speed = 1
+
+def vels(speed):
+    return " Set values: speed %s" % (speed)
+
+def sgn(val):
+    if (val < 0):
+        return -1
+    else :
+        return 1
+
+def curvature(a,b,c,m):
+    xy = math.sqrt(a**2 + b**2 - 2*a*b*math.cos(m))
+    yz = math.sqrt(b**2 + c**2 - 2*b*c*math.cos(m))
+    zx = math.sqrt(a**2 + c**2 - 2*a*c*math.cos(2*m))
+    s = (xy + yz + zx)/2.0
+    A = math.sqrt(s*(s-xy)*(s-yz)*(s-zx))
+    crvtr = 4.0*A/(xy*yz*zx)
+    return crvtr
+
+def sat(val):
+    clip = 0.03
+    satVal = 0.0
+    if(val < -clip):
+        satVal = -1.0
+    elif(val > clip):
+        satVal = 1.0
+    elif(val >= -clip and val <= clip):
+        satVal = val/clip
+    else:
+        satVal = 0.0
+    return satVal
+
+#boundaryTrack params
+global steerControl_bt, linvelControl_bt
+steerControl_bt = linvelControl_bt = 0.0
+global Kavg
+Kavg = 0.0
+mu = 1.0
+alpha = 2.0
+rho_o = 1.5
+rho_max = LR = 3.0
+
+
+def laserscanCb(msg):
+        
+    scanrangeList = msg.ranges
+    rho = min(scanrangeList)
+    laserA = float(abs(msg.angle_max))
+    laserN = 721.0
+    indR = float(scanrangeList.index(rho))
+    delta = laserA*(2*indR/(laserN-1)-1)
+    if (delta>=0 and delta <= math.pi):
+        phi = delta - math.pi/2.0
+    else:
+        phi = delta + math.pi/2.0
+
+    
+    anSeg = 5*2   
+    a = scanrangeList[scanrangeList.index(rho) - anSeg]
+    b = rho
+    c = scanrangeList[scanrangeList.index(rho) + anSeg]
+    K9 = curvature(a,b,c,anSeg*laserA/(laserN-1))
+
+    anSeg = 6*2
+    a = scanrangeList[scanrangeList.index(rho) - anSeg]
+    b = rho
+    c = scanrangeList[scanrangeList.index(rho) + anSeg]
+    K8 = curvature(a,b,c,anSeg*laserA/(laserN-1))
+
+    anSeg = 7*2
+    a = scanrangeList[scanrangeList.index(rho) - anSeg]
+    b = rho
+    c = scanrangeList[scanrangeList.index(rho) + anSeg]
+    K7 = curvature(a,b,c,anSeg*laserA/(laserN-1))
+
+    Kavg1 = ( K9 + K8 + K7)/3.0
+    print "Kavg1 - 2*789",Kavg1
+
+    anSeg = 7   
+    a = scanrangeList[scanrangeList.index(rho) - anSeg]
+    b = rho
+    c = scanrangeList[scanrangeList.index(rho) + anSeg]
+    K9 = curvature(a,b,c,anSeg*laserA/(laserN-1))
+
+    anSeg = 6
+    a = scanrangeList[scanrangeList.index(rho) - anSeg]
+    b = rho
+    c = scanrangeList[scanrangeList.index(rho) + anSeg]
+    K8 = curvature(a,b,c,anSeg*laserA/(laserN-1))
+
+    anSeg = 5
+    a = scanrangeList[scanrangeList.index(rho) - anSeg]
+    b = rho
+    c = scanrangeList[scanrangeList.index(rho) + anSeg]
+    K7 = curvature(a,b,c,anSeg*laserA/(laserN-1))
+
+    Kavg2 = (K9 + K8 + K7)/3.0
+    print "Kavg - 789",Kavg2
+
+    global steerControl_bt, linvelControl_bt
+    if (all(100.0 == min(elem,100.0) for elem in scanrangeList)):   
+        steerControl_bt = 0.0
+        linvelControl_bt = speed
+
+    else:
+        if(any(elem < LR  for elem in scanrangeList)):
+           
+            steerControl_bt = mu*math.sin(phi) + alpha*(1-(rho_o/rho)**2)*math.cos(phi)*sgn(delta) + math.cos(phi)*Kavg1/(1+Kavg1*rho)
+            if(math.isnan(Kavg1)):
+                print("MF")
+                steerControl_bt = mu*math.sin(phi) + alpha*(1-(rho_o/rho)**2)*math.cos(phi)*sgn(delta) + math.cos(phi)*Kavg2/(1+Kavg2*rho)
+            linvelControl_bt = speed
+        else:
+            steerControl_bt = 0.0
+            linvelControl_bt = speed
+        
+    dummyPub1.publish(sgn(delta))    
+    dummyPub2.publish(rho)
+
+
+if __name__=="__main__":
+    
+    rospy.init_node('turtlebot_teleop',disable_signals=True)
+    rate = rospy.Rate(100)
+    dummyPub1 = rospy.Publisher('/dummy1', Float32, queue_size=10)
+    dummyPub2 = rospy.Publisher('/dummy2', Float32, queue_size=10)
+    pub = rospy.Publisher('/cmd_vel', Twist, queue_size=5)
+    laserSub = rospy.Subscriber('/scan',LaserScan,laserscanCb)
+
+    try:
+        print vels(speed)
+
+        while not rospy.is_shutdown():
+            try:
+                twist = Twist()
+                twist.linear.x = linvelControl_bt; twist.linear.y = 0; twist.linear.z = 0
+                twist.angular.x = 0; twist.angular.y = 0; twist.angular.z = steerControl_bt
+                pub.publish(twist)
+                rate.sleep()
+            except KeyboardInterrupt:
+                break
+
+    except Exception as e:
+        print("!!!!! Other Exception !!!!!")
+        print(e.message)
+
+    finally:
+        twist = Twist()
+        twist.linear.x = 0; twist.linear.y = 0; twist.linear.z = 0
+        twist.angular.x = 0; twist.angular.y = 0; twist.angular.z = 0
+        pub.publish(twist)

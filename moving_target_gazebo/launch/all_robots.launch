@@ -1,0 +1,22 @@
+<launch>
+  <!-- No namespace here as we will share this description. 
+       Access with slash at the beginning -->
+  
+  <!-- BEGIN ROBOT 1-->
+  <group ns="target">
+    <param name="tf_prefix" value="target_tf" />
+    <include file="$(find moving_target_gazebo)/launch/single_robot.launch" >
+      <arg name="init_pose" value="-x 5.0 -y 0.0" />
+      <arg name="robot_name"  value="target" />
+    </include>
+  </group>
+ 
+  <!-- BEGIN ROBOT 2-->
+  <group ns="follower">
+    <param name="tf_prefix" value="follower_tf" />
+    <include file="$(find moving_target_gazebo)/launch/single_robot.launch" >
+      <arg name="init_pose" value="-x -5.0 -y -5.0" />
+      <arg name="robot_name"  value="follower" />
+    </include>
+  </group>
+</launch>

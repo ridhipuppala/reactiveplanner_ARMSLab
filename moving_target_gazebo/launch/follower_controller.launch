@@ -1,0 +1,5 @@
+<launch>
+  <!-- CMD vel node already has its own built in velocity smoother -->
+  <node pkg="moving_target_gazebo" type="follower_controller" name="follower_controller"  output="screen"/>
+
+</launch>

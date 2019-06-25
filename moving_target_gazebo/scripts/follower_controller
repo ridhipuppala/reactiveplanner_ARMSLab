@@ -1,0 +1,264 @@
+#!/usr/bin/env python
+
+import rospy
+import signal
+from geometry_msgs.msg import Point, Pose, Quaternion, Twist, Vector3
+from std_msgs.msg import Float32
+from nav_msgs.msg import Odometry
+from sensor_msgs.msg import LaserScan
+from tf.transformations import euler_from_quaternion, quaternion_from_euler
+import math
+import string
+
+speed = 1.0
+
+def vels(speed,beta,Ku, rho_min, rho_o, rho_max,a):
+    return " Set values: speed %s beta %s Ku %s SD(rho_min) %s desRho(rho_o) %s LR(rho_max) %s alpha %s " % (speed,beta,Ku, rho_min, rho_o, rho_max,a)
+
+def get_rotation (msg):
+    roll = pitch = yaw = 0.0
+    orientation_q = msg.pose.pose.orientation
+    orientation_list = [orientation_q.x, orientation_q.y, orientation_q.z, orientation_q.w]
+    (roll, pitch, yaw) = euler_from_quaternion (orientation_list)
+    return yaw
+
+def sgn(val):
+    if (val < 0.0):
+        return -1
+    else :
+        return 1
+
+def sat_cosdelta(val):
+    clip = 0.2
+    satVal = 0.0
+    if(val < -clip):
+        satVal = -1.0
+    elif(val > clip):
+        satVal = 1.0
+    elif(val >= -clip and val <= clip):
+        satVal = val/clip
+    else:
+        satVal = 0.0
+    return(satVal)
+
+def sat_sliding_s(val):
+    clip = 0.05
+    satVal = 0.0
+    if(val < -clip):
+        satVal = -1.0
+    elif(val > clip):
+        satVal = 1.0
+    elif(val >= -clip and val <= clip):
+        satVal = val/clip
+    else:
+        satVal = 0.0
+    return satVal
+
+def clip(val):
+    if(abs(val) > 0.001):
+        return val
+    else:
+        return 0.0
+
+def clip_steercontrol(val):
+    clipperVal = 1.5*math.pi
+    if(val > clipperVal):
+        return clipperVal
+    elif(val < -clipperVal):
+        return -clipperVal
+    else:
+        return val
+
+global x_t,y_t,Vt,alpha_t
+x_t = y_t = Vt = alpha_t = 0.0
+def target_odometryCb(msg):
+    global x_t,y_t,Vt,alpha_t
+    x_t = msg.pose.pose.position.x
+    y_t = msg.pose.pose.position.y
+    r_t = math.sqrt(x_t**2 + y_t**2)
+    alpha_t = get_rotation(msg)
+    theta_t = math.atan2(y_t,x_t)
+    Vt = msg.twist.twist.linear.x
+
+
+#Follower Homing Params
+global steerControl, linvelControl, currSat, prevSat, sliding_s, r_ft
+steerControl = linvelControl = currSat = prevSat = sliding_s = r_ft =  0.0
+Rth = 1.0
+maxerr = 0.3*speed
+# beta = 1.1 + (1 + Rth)*maxerr/speed
+Khom = 0.1 + 1.7/Rth #+ maxerr/Rth
+
+
+global state, prevState
+state = prevState = 0
+
+def follower_odometryCb(msg):
+  
+    global steerControl, linvelControl, state, r_ft, sliding_s
+    x_f = msg.pose.pose.position.x
+    y_f = msg.pose.pose.position.y
+    r_f = math.sqrt(x_f**2 + y_f**2)
+    alpha_f = get_rotation(msg)
+    theta_f = math.atan2(y_f,x_f)
+    Vf = msg.twist.twist.linear.x
+
+    r_ft = math.sqrt((x_f-x_t)**2+(y_f-y_t)**2)
+    theta_ft = math.atan2(y_f-y_t, x_f-x_t)  
+    sliding_s = math.pi - (alpha_f - theta_ft)
+    sliding_s = math.atan2(math.sin(sliding_s),math.cos(sliding_s))
+
+    if(r_ft < Rth):
+        linvelControl = 0.0
+        steerControl = 0.0
+        print("!!!!!!!!Target Proximity!!!!!")
+    else:
+        steerControl = Khom*sgn(sliding_s)
+        linvelControl = speed
+
+
+
+    
+#boundaryTrack params
+global steerControl_bt, linvelControl_bt, rho
+steerControl_bt = linvelControl_bt = rho = 0.0
+rho_min = SD = 0.8
+rho_max = LR = 2.0
+rho_o = 1.0
+Ku = 1.0/rho_min
+# Ku = 1.0
+a = 2.0
+
+global exitFlag, btCount
+exitFlag = btCount = 0
+
+def follower_laserscanCb(msg):
+
+    global rho, steerControl_bt, linvelControl_bt, r_ft, state, prevState
+    global exitFlag,btCount,sliding_s, currSat, prevSat
+    scanrangeList = msg.ranges
+    rho = min(scanrangeList)
+    laserA = float(abs(msg.angle_max))
+    laserN = 721.0
+    indR = float(scanrangeList.index(rho))
+    delta = laserA*(2*indR/(laserN-1)-1)
+    currSat = clip(sat_sliding_s(sliding_s))
+
+    if (r_ft < Rth):
+        state = -1
+        linvelControl_bt = 0.0
+        steerControl_bt = 0.0
+        linvelControl = 0.0
+        steerControl = 0.0
+        exitFlag = 0
+    else:
+        if (all(100.0*msg.range_max == min(elem,100.0*msg.range_max)  for elem in scanrangeList)):     
+            steerControl_bt = 0.0
+            linvelControl_bt = 0.0
+            state = 0
+            exitFlag = 0
+        else:
+            if(prevState == 0):
+                scaleN = 121.0
+                scaleA = laserA/6.0
+                scaleScanList = scanrangeList[300:421]
+                scale_rho = min(scaleScanList)
+                scale_indR = float(scaleScanList.index(scale_rho))
+                scale_delta = scaleA*(2*scale_indR/(scaleN - 1) - 1)
+                exitFlag = 0
+
+                if(any(elem < LR  for elem in scaleScanList)):            
+                    steerControl_bt = clip_steercontrol(-Ku*sgn(math.cos(scale_delta))*sgn(scale_delta) + a*(1-(rho_o/rho)**2)*sgn(scale_delta))
+                    linvelControl_bt = speed
+                    state  = 1    
+                else:
+                    state = 0
+            else:
+                if(any(elem < LR  for elem in scanrangeList)):            
+                    steerControl_bt = clip_steercontrol(-Ku*sgn(math.cos(delta))*sgn(delta) + a*(1-(rho_o/rho)**2)*sgn(delta))
+                    linvelControl_bt = speed
+                    state  = 1     
+                    if(currSat*prevSat < 0.0 and currSat*prevSat != 0.0):
+                        btCount = btCount + 1
+                        print("!!!!!!!!!!BT exit cond arrived!!!!!!!!!!!!!!: Count:",btCount)
+                        exitFlag = 1
+                        state = 0
+                    else:
+                        exitFlag = 0
+                        state  = 1
+                        pass
+                else:
+                    linvelControl_bt = 0.0
+                    steerControl_bt = 0.0
+                    state = 0
+                    exitFlag = 0
+         
+    prevSat = currSat
+    prevState = state
+    dummyPub1.publish(currSat)
+    dummyPub2.publish(sliding_s*180/math.pi)
+
+if __name__=="__main__":
+
+    rospy.init_node('turtlebot_teleop',disable_signals=True)
+    rate = rospy.Rate(100)
+    
+    dummyPub1 = rospy.Publisher('/f_dummy1', Float32, queue_size=10)
+    dummyPub2 = rospy.Publisher('/f_dummy2', Float32, queue_size=10)
+
+    statePub = rospy.Publisher('/follower/state', Float32, queue_size=10)
+    speedPub = rospy.Publisher('/speed', Float32, queue_size=10)
+    turnPub = rospy.Publisher('/turn', Float32, queue_size=10)
+
+    follower_cmdVelPub = rospy.Publisher('/follower/cmd_vel', Twist, queue_size=5)
+    target_odomSub = rospy.Subscriber('/target/odom',Odometry,target_odometryCb)
+    follower_odomSub = rospy.Subscriber('/follower/odom',Odometry,follower_odometryCb)
+    follower_laserSub = rospy.Subscriber('/follower/scan',LaserScan,follower_laserscanCb)
+
+    control_speed = 0.0
+    control_turn = 0.0
+        
+    try:
+        print vels(speed,Khom,Ku, rho_min, rho_o, rho_max,a)
+
+        while not rospy.is_shutdown():
+            try:
+
+            #Control Inputs assignment
+                if (state == 0):
+                    control_speed = linvelControl
+                    control_turn = steerControl
+                    exitFlag = 0
+                elif (state == 1):
+                    control_speed = linvelControl_bt
+                    control_turn = steerControl_bt
+                else:
+                    control_speed = 0
+                    control_turn = 0
+                    exitFlag = 0
+                            
+                twist = Twist()
+                twist.linear.x =  control_speed
+                twist.angular.z = control_turn
+                twist.linear.y = 0; twist.linear.z = 0
+                twist.angular.x = 0; twist.angular.y = 0
+                follower_cmdVelPub.publish(twist)
+
+                statePub.publish(state)
+                speedPub.publish(control_speed)
+                turnPub.publish(control_turn)
+
+                rate.sleep()
+                
+            except KeyboardInterrupt:
+                break
+
+    except Exception as e:
+        print("!!!!!!!!! Other Exception !!!!!")
+        print(e.message)
+
+    finally:
+        twist = Twist()
+        twist.linear.x = 0; twist.linear.y = 0; twist.linear.z = 0
+        twist.angular.x = 0; twist.angular.y = 0; twist.angular.z = 0
+        follower_cmdVelPub.publish(twist)

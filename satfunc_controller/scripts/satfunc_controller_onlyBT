@@ -1,0 +1,134 @@
+#!/usr/bin/env python
+
+import rospy
+import signal
+from geometry_msgs.msg import Point, Pose, Quaternion, Twist, Vector3
+from std_msgs.msg import Float32
+from nav_msgs.msg import Odometry
+from sensor_msgs.msg import LaserScan
+from tf.transformations import euler_from_quaternion, quaternion_from_euler
+import math
+import string
+
+global speed
+speed = 1.0
+
+def vels(speed,Ku, rho_o):
+    return " Set values: speed %s Ku %s rho_o %s" % (speed,Ku, rho_o)
+
+def sgn(val):
+    if (val < 0):
+        return -1
+    else :
+        return 1
+
+def clip(val):
+    clipperVal = abs( 1- (rho_o/rho)*(rho_o/rho) )
+    if(abs(val) > 0.001):
+        return val
+    else:
+        return 0.0
+
+def clip_steercontrol(val):
+    clipperVal = math.pi
+    if(val > clipperVal or val < -clipperVal):
+        return clipperVal
+    else:
+        return val
+
+def sat(val):
+    clip = 0.2
+    satVal = 0.0
+    if(val < -clip):
+        satVal = -1.0
+    elif(val > clip):
+        satVal = 1.0
+    elif(val >= -clip and val <= clip):
+        satVal = val/clip
+    else:
+        satVal = 0.0
+    return(satVal)
+
+#boundaryTrack params
+global steerControl_bt, linvelControl_bt, a
+steerControl_bt = linvelControl_bt = 0.0
+
+
+#System params
+rho_min = SD = 0.8
+rho_max = LR = 3.0
+rho_o = 2
+Ku = 0.1 + 1.0/rho_min
+a = 3.0
+delta_clip = math.pi/18.0
+
+def laserscanCb(msg):
+        
+    scanrangeList = msg.ranges
+    rho = min(scanrangeList)
+    laserA = float(abs(msg.angle_max))
+    laserN = 721.0
+    indR = float(scanrangeList.index(rho))
+    delta = laserA*(2*indR/(laserN-1)-1)
+    
+    global steerControl_bt, linvelControl_bt,speed, a
+
+    if (all(100.0 == min(elem,100.0) for elem in scanrangeList)):   
+        steerControl_bt = 0.0
+        linvelControl_bt = speed
+    else:
+        if(any(elem < LR  for elem in scanrangeList)): 
+            # if(delta >= 0.0 and delta <= math.pi):
+            #     if(delta >= math.pi/2 - delta_clip and delta <= math.pi/2 + delta_clip):
+            #         N = b + a*(1-(rho_o/rho)**2)
+            #     else:
+            #         N = b + a*(1-(rho_o/rho)**2)#*(math.cos(delta))/(math.pi/2 - delta)
+            # else:                       
+            #     if(delta >= -math.pi/2 - delta_clip and delta <= -math.pi/2 + delta_clip):
+            #         N = b - a*(1-(rho_o/rho)**2)
+            #     else:
+            #         N = b - a*(1-(rho_o/rho)**2)#*(math.cos(delta))/(math.pi/2 + delta)
+            
+            #steerControl_bt = clip_steercontrol(-Ku*sat(math.cos(delta))*sgn(delta) + a*(1-(rho_o/rho)**2)*sgn(delta)) 
+            
+            steerControl_bt = clip_steercontrol(-Ku*sat(math.cos(delta))*sgn(delta) +(Ku+0.1)*sgn(delta)*sat(1-rho_o/rho) ) 
+            linvelControl_bt = speed
+        else:
+            steerControl_bt = 0.0
+            linvelControl_bt = speed
+
+    dummyPub1.publish(rho)    
+    dummyPub2.publish(a*(1-(rho_o/rho)**2)*sgn(delta))
+
+
+if __name__=="__main__":
+    
+    rospy.init_node('turtlebot_teleop',disable_signals=True)
+    rate = rospy.Rate(100)
+    dummyPub1 = rospy.Publisher('/dummy1', Float32, queue_size=10)
+    dummyPub2 = rospy.Publisher('/dummy2', Float32, queue_size=10)
+    pub = rospy.Publisher('/cmd_vel', Twist, queue_size=5)
+    laserSub = rospy.Subscriber('/scan',LaserScan,laserscanCb)
+
+    try:
+        print vels(speed,Ku, rho_o)
+
+        while not rospy.is_shutdown():
+            try:
+                twist = Twist()
+                twist.linear.x = linvelControl_bt; twist.linear.y = 0; twist.linear.z = 0
+                twist.angular.x = 0; twist.angular.y = 0; twist.angular.z = steerControl_bt
+                pub.publish(twist)
+                rate.sleep()
+            except KeyboardInterrupt:
+                break
+
+    except Exception as e:
+        print("!!!!! Other Exception !!!!!")
+        print(e.message)
+
+    finally:
+        twist = Twist()
+        twist.linear.x = 0; twist.linear.y = 0; twist.linear.z = 0
+        twist.angular.x = 0; twist.angular.y = 0; twist.angular.z = 0
+        pub.publish(twist)

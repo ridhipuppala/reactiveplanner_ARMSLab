@@ -1,0 +1,94 @@
+#!/usr/bin/env python
+
+import rospy
+import signal
+from geometry_msgs.msg import Point, Pose, Quaternion, Twist, Vector3
+from std_msgs.msg import Float32
+from nav_msgs.msg import Odometry
+from sensor_msgs.msg import LaserScan
+from tf.transformations import euler_from_quaternion, quaternion_from_euler
+import math
+import string
+
+speed = 1
+turn = 1
+
+def vels(speed,turn,Ku):
+    return " Set values: speed %s turn %s Ku %s " % (speed,turn,Ku)
+
+def get_rotation (msg):
+    roll = pitch = yaw = 0.0
+    orientation_q = msg.pose.pose.orientation
+    orientation_list = [orientation_q.x, orientation_q.y, orientation_q.z, orientation_q.w]
+    (roll, pitch, yaw) = euler_from_quaternion (orientation_list)
+    return yaw
+
+def sgn(val):
+    if (val < 0):
+        return -1
+    else :
+        return 1
+
+#boundaryTrack params
+global steerControl_bt
+global linvelControl_bt
+steerControl_bt = 0.0
+linvelControl_bt = 0.0
+Ku = 0.5
+
+def laserscanCb(msg):
+        
+    scanrangeList = msg.ranges
+    minRval = min(scanrangeList)
+    laserA = float(abs(msg.angle_max))
+    laserN = 721.0
+    indR = float(scanrangeList.index(minRval))
+    minDistangle = -laserA*(2*indR/(laserN-1)-1)
+    
+
+    global steerControl_bt
+    global linvelControl_bt
+    global gr
+    if (all(100.0 == min(elem,100.0) for elem in scanrangeList)):   
+        steerControl_bt = 0
+        linvelControl_bt = 0
+    else:
+        Rsd = 0.5
+        pen = abs(1-(Rsd/minRval)*(Rsd/minRval))
+        steerControl_bt = Ku*sgn(math.cos(minDistangle))*sgn(minDistangle)
+        linvelControl_bt = speed
+    dummyPub1.publish(minDistangle)    
+    dummyPub2.publish(minRval)
+
+
+if __name__=="__main__":
+    
+    rospy.init_node('turtlebot_teleop',disable_signals=True)
+    rate = rospy.Rate(100)
+    dummyPub1 = rospy.Publisher('/dummy1', Float32, queue_size=10)
+    dummyPub2 = rospy.Publisher('/dummy2', Float32, queue_size=10)
+    pub = rospy.Publisher('/cmd_vel', Twist, queue_size=5)
+    laserSub = rospy.Subscriber('/scan',LaserScan,laserscanCb)
+
+    try:
+        print vels(speed,turn,Ku)
+
+        while not rospy.is_shutdown():
+            try:
+                twist = Twist()
+                twist.linear.x = linvelControl_bt; twist.linear.y = 0; twist.linear.z = 0
+                twist.angular.x = 0; twist.angular.y = 0; twist.angular.z = steerControl_bt
+                pub.publish(twist)
+                rate.sleep()
+            except KeyboardInterrupt:
+                break
+
+    except Exception as e:
+        print("!!!!! Other Exception !!!!!")
+        print(e.message)
+
+    finally:
+        twist = Twist()
+        twist.linear.x = 0; twist.linear.y = 0; twist.linear.z = 0
+        twist.angular.x = 0; twist.angular.y = 0; twist.angular.z = 0
+        pub.publish(twist)

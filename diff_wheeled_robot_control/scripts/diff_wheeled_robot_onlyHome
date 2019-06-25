@@ -1,0 +1,105 @@
+#!/usr/bin/env python
+
+import rospy
+import signal
+from geometry_msgs.msg import Point, Pose, Quaternion, Twist, Vector3
+from std_msgs.msg import Float32
+from nav_msgs.msg import Odometry
+from sensor_msgs.msg import LaserScan
+from tf.transformations import euler_from_quaternion, quaternion_from_euler
+import math
+import string
+
+
+speed = 1
+turn = 1
+def vels(speed,turn,beta):
+    return " Set values: speed %s turn %s beta %s " % (speed,turn,beta)
+
+def get_rotation (msg):
+    roll = pitch = yaw = 0.0
+    orientation_q = msg.pose.pose.orientation
+    orientation_list = [orientation_q.x, orientation_q.y, orientation_q.z, orientation_q.w]
+    (roll, pitch, yaw) = euler_from_quaternion (orientation_list)
+    return yaw
+
+def sgn(val):
+    if (val < 0):
+        return -1
+    else :
+        return 1
+
+global gr
+global steerControl
+global linvelControl
+gr = 0.0
+steerControl = 0.0
+linvelControl = 0.0
+#target threshold radius
+Rth = 1
+maxerr = 0.3*speed
+beta = 1 + (1 + Rth)*maxerr/speed
+
+def odometryCb(msg):
+    gx = msg.pose.pose.position.x
+    gy = msg.pose.pose.position.y
+    global gr
+    gr = math.sqrt(gx*gx + gy*gy)
+    yaw = get_rotation(msg)
+    #yaw is robot heading direction or angle between heading vector and global x axis
+    theta = math.atan2(gy,gx)
+    currspeed = msg.twist.twist.linear.x
+    thetadot = (currspeed*math.sin(yaw - theta))/gr #thetadot computation
+    global steerControl
+    global linvelControl
+    if(gr < Rth):
+        linvelControl = 0
+        steerControl = 0
+    else:
+        steerControl = beta*currspeed*sgn(thetadot)/Rth
+        linvelControl = speed
+
+    alphaPub.publish(yaw)
+    thPub.publish(theta)
+    thdotPub.publish(thetadot)
+    dummyPub1.publish(steerControl)
+
+
+if __name__=="__main__":
+
+    rospy.init_node('turtlebot_teleop',disable_signals=True)
+    rate = rospy.Rate(100)
+    
+    alphaPub = rospy.Publisher('/al_topic', Float32, queue_size=10)
+    thPub = rospy.Publisher('/th_topic', Float32, queue_size=10)
+    thdotPub = rospy.Publisher('/thdot_topic', Float32, queue_size=10)
+    dummyPub1 = rospy.Publisher('/dummy1', Float32, queue_size=10)
+
+    pub = rospy.Publisher('/cmd_vel', Twist, queue_size=5)
+    odomSub = rospy.Subscriber('/odom',Odometry,odometryCb)
+
+    try:
+        print vels(speed,turn,beta)
+
+        while not rospy.is_shutdown():
+            try:
+                twist = Twist()
+                twist.linear.x = linvelControl; twist.linear.y = 0; twist.linear.z = 0
+                twist.angular.x = 0; twist.angular.y = 0; twist.angular.z = steerControl
+                pub.publish(twist)
+                rate.sleep()
+            except KeyboardInterrupt:
+                break
+
+    except Exception as e:
+        print("!!!!! Other Exception !!!!!")
+        print(e.message)
+
+    finally:
+        twist = Twist()
+        twist.linear.x = 0; twist.linear.y = 0; twist.linear.z = 0
+        twist.angular.x = 0; twist.angular.y = 0; twist.angular.z = 0
+        pub.publish(twist)
+
+  
+

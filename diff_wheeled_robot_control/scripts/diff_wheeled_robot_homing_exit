@@ -1,0 +1,223 @@
+#!/usr/bin/env python
+
+import rospy
+import signal
+from geometry_msgs.msg import Point, Pose, Quaternion, Twist, Vector3
+from std_msgs.msg import Float32
+from nav_msgs.msg import Odometry
+from sensor_msgs.msg import LaserScan
+from tf.transformations import euler_from_quaternion, quaternion_from_euler
+import math
+import string
+
+speed = 1
+turn = 1
+
+def vels(speed,turn,Ku,beta,sd):
+    return " Set values: speed %s turn %s Ku %s beta %s Obst Safe Dist %s " % (speed,turn,Ku,beta,sd)
+
+def get_rotation (msg):
+    roll = pitch = yaw = 0.0
+    orientation_q = msg.pose.pose.orientation
+    orientation_list = [orientation_q.x, orientation_q.y, orientation_q.z, orientation_q.w]
+    (roll, pitch, yaw) = euler_from_quaternion (orientation_list)
+    return yaw
+
+def sgn(val):
+    if (val < 0.0):
+        return -1
+    else :
+        return 1
+
+global gr, steerControl, linvelControl
+gr = steerControl = linvelControl = 0.0
+#target threshold radius
+Rth = 1
+maxerr = 0.3*speed
+beta = 2 + (1 + Rth)*maxerr/speed
+
+global currSgn, prevSgn
+global state
+state = currSgn = prevSgn =  0
+global thetadot
+thetadot = 0.0
+
+
+def odometryCb(msg):
+  
+    global gr, steerControl, linvelControl, state, thetadot
+    gx = msg.pose.pose.position.x
+    gy = msg.pose.pose.position.y
+
+
+    gr = math.sqrt(gx*gx + gy*gy)
+    yaw = get_rotation(msg)
+    #yaw is robot heading direction or angle between heading vector and global x axis
+    theta = math.atan2(gy,gx)
+    currspeed = msg.twist.twist.linear.x
+    global thetadot
+    thetadot = (currspeed*math.sin(yaw - theta))/gr #thetadot computation
+
+    if(gr < Rth):
+        linvelControl = 0.0
+        steerControl = 0.0
+    else:
+        steerControl = beta*speed*sgn(thetadot)/Rth
+        linvelControl = speed
+
+    alphaPub.publish(yaw)
+    thPub.publish(theta)
+    thdotPub.publish(sgn(thetadot))
+
+#boundaryTrack params
+global steerControl_bt, linvelControl_bt
+steerControl_bt = linvelControl_bt = 0.0
+Ku = 1
+obstSD = 2
+
+global stateChangeTime 
+stateChangeTime = 0.0
+global exitFlag
+exitFlag = 0
+
+global minRval 
+minRval = 0.0
+
+
+def laserscanCb(msg):
+
+    global minRval, steerControl_bt, linvelControl_bt, gr, state
+    global stateChangeTime, exitFlag, thetadot, currSgn, prevSgn
+    scanrangeList = msg.ranges
+    minRval = min(scanrangeList)
+    laserA = float(abs(msg.angle_max))
+    laserN = 721.0
+    indR = float(scanrangeList.index(minRval))
+    minDistangle = -laserA*(2*indR/(laserN-1)-1)
+    currSgn = sgn(thetadot)
+
+    if (gr < Rth):
+        state = -1
+        linvelControl_bt = 0.0
+        steerControl_bt = 0.0
+        linvelControl = 0.0
+        steerControl = 0.0
+        exitFlag = 0
+
+    else:
+        if (all(100.0*msg.range_max == min(elem,100.0*msg.range_max)  for elem in scanrangeList)):     
+            steerControl_bt = 0.0
+            linvelControl_bt = 0.0
+            state = 0
+            exitFlag = 0
+        else:
+            if(any(elem < obstSD  for elem in scanrangeList)):            
+                steerControl_bt = Ku*sgn(math.cos(minDistangle))*sgn(minDistangle)
+                linvelControl_bt = speed
+                state  = 1     
+                if(currSgn*prevSgn == -1):
+                    print("!!!!!!!!!!BT exit cond arrived!!!!!!!!!!!!!!!!!")
+                    exitFlag = 1
+                    state = 0
+                    stateChangeTime = rospy.get_time()
+                    print("Exit State Change Time Updated")
+
+                else:
+                    exitFlag = 0
+                    pass
+            else:
+                linvelControl_bt = 0.0
+                steerControl_bt = 0.0
+                state = 0
+                exitFlag = 0
+            
+        if(rospy.get_time() - stateChangeTime < 1.0):
+            state = 0
+            exitFlag = 1
+            #print("Homing after Exit cond.")
+        else:
+            exitFlag = 0
+    
+    prevSgn = currSgn        
+    dummyPub1.publish(minRval)
+    dummyPub2.publish(exitFlag)
+    bt_steer.publish(steerControl_bt)
+    bt_lin.publish(linvelControl_bt)
+
+
+if __name__=="__main__":
+
+    rospy.init_node('turtlebot_teleop',disable_signals=True)
+    rate = rospy.Rate(100)
+    
+    alphaPub = rospy.Publisher('/al', Float32, queue_size=10)
+    thPub = rospy.Publisher('/th', Float32, queue_size=10)
+    thdotPub = rospy.Publisher('/thdot', Float32, queue_size=10)
+    dummyPub1 = rospy.Publisher('/dummy1', Float32, queue_size=10)
+    dummyPub2 = rospy.Publisher('/dummy2', Float32, queue_size=10)
+
+    home_steer = rospy.Publisher('/home_steer', Float32, queue_size=10)
+    home_lin = rospy.Publisher('/home_lin', Float32, queue_size=10)
+    bt_steer = rospy.Publisher('/bt_steer', Float32, queue_size=10)
+    bt_lin = rospy.Publisher('/bt_lin', Float32, queue_size=10)
+    statePub = rospy.Publisher('/state', Float32, queue_size=10)
+    speedPub = rospy.Publisher('/speed', Float32, queue_size=10)
+    turnPub = rospy.Publisher('/turn', Float32, queue_size=10)
+
+
+
+    pub = rospy.Publisher('/cmd_vel', Twist, queue_size=5)
+    odomSub = rospy.Subscriber('/odom',Odometry,odometryCb)
+    laserSub = rospy.Subscriber('/scan',LaserScan,laserscanCb)
+
+    control_speed = 0.0
+    control_turn = 0.0
+        
+    try:
+        print vels(speed,turn,Ku,beta,obstSD)
+
+        while not rospy.is_shutdown():
+            try:
+
+            #Control Inputs assignment
+                if (state == 0):
+                    control_speed = linvelControl
+                    control_turn = steerControl
+                    exitFlag = 0
+                elif (state == 1):
+                    control_speed = linvelControl_bt
+                    control_turn = steerControl_bt
+                # elif(exitFlag == 1):
+                #     control_speed = linvelControl
+                #     control_turn = steerControl
+                else:
+                    control_speed = 0
+                    control_turn = 0
+                    exitFlag = 0
+                
+                
+                twist = Twist()
+                twist.linear.x =  control_speed
+                twist.angular.z = control_turn
+                twist.linear.y = 0; twist.linear.z = 0
+                twist.angular.x = 0; twist.angular.y = 0
+                pub.publish(twist)
+                statePub.publish(state)
+                speedPub.publish(control_speed)
+                turnPub.publish(control_turn)
+
+                rate.sleep()
+                
+
+            except KeyboardInterrupt:
+                break
+
+    except Exception as e:
+        print("!!!!! Other Exception !!!!!")
+        print(e.message)
+
+    finally:
+        twist = Twist()
+        twist.linear.x = 0; twist.linear.y = 0; twist.linear.z = 0
+        twist.angular.x = 0; twist.angular.y = 0; twist.angular.z = 0
+        pub.publish(twist)

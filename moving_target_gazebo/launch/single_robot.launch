@@ -1,0 +1,16 @@
+<launch>
+
+  <arg name="robot_name"/>
+  <arg name="init_pose"/>
+ 
+  <param name="robot_description" command="$(find xacro)/xacro.py '$(find mastering_ros_robot_description_pkg)/urdf/single_robot.xacro'" />   
+  
+  <node name="differential_wheeled_robot" pkg="gazebo_ros" type="spawn_model" respawn="false" output="screen"
+     args="$(arg init_pose) -urdf -param robot_description -model $(arg robot_name)" />
+  
+  <node name="joint_state_publisher" pkg="joint_state_publisher" type="joint_state_publisher" ></node> 
+  <node  name="robot_state_publisher" pkg="robot_state_publisher" type="state_publisher" output="screen" >
+    <param name="publish_frequency" type="double" value="100.0" />
+  </node>
+
+ </launch>
